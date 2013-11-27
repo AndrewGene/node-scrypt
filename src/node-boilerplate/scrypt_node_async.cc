@@ -28,16 +28,20 @@ Barry Steyn barry.steyn@gmail.com
 #include <node.h>
 #include <v8.h>
 #include <string>
+#include <stdlib.h>
+
+//FOR TESTING - ReMOVE
+#include <iostream>
 
 #include "scrypt_node_async.h"
 #include "scrypt_common.h"
-#include "base64.h"
 
 //Scrypt is a C library
 extern "C" {
     #include "../../scrypt/scrypt-1.1.6/lib/scryptenc/scryptenc.h"
     #include "keyderivation.h"
     #include "passwordhash.h"
+    #include "base64.h"
 }
 
 using namespace v8;
@@ -54,11 +58,12 @@ struct Baton {
     int result;
     std::string message;
     std::string password;
-    std::string output;
+    char* output;
+    size_t outputLength;
+
     size_t maxmem;
     double maxmemfrac;
     double maxtime;
-    size_t outbuflen;
 };
 
 /*
@@ -364,6 +369,7 @@ Handle<Value> HashAsyncBefore(const Arguments& args) {
 void HashWork(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
     uint8_t outbuf[96]; //Header size for password derivation is fixed
+    char *base64Encode = NULL;
     
     //perform scrypt password hash
     baton->result = HashPassword(
@@ -371,11 +377,11 @@ void HashWork(uv_work_t* req) {
         outbuf,
         baton->maxmem, baton->maxmemfrac, baton->maxtime
     );
-
+    
+    std::cout << "STARTING HERE\n";
     //Base64 encode for storage
-    int base64EncodedLength = calcBase64EncodedLength(96);
-    char base64Encode[base64EncodedLength + 1];
-    base64_encode(outbuf, 96, base64Encode);
+    baton->outputLength = base64_encode(outbuf, 96, &base64Encode);
+    std::cout << "ENDING HERE\n";
     baton->output = base64Encode;
 }
 
@@ -406,7 +412,7 @@ void HashAsyncAfter(uv_work_t* req) {
         const unsigned argc = 2;
         Local<Value> argv[argc] = {
             Local<Value>::New(Null()),
-            Local<Value>::New(String::New((const char*)baton->output.c_str(), baton->output.length()))
+            Local<Value>::New(String::New((const char*)baton->output, baton->outputLength))
         };
 
         TryCatch try_catch;
@@ -417,6 +423,7 @@ void HashAsyncAfter(uv_work_t* req) {
     }
 
     //Clean up
+    if (baton->output) delete baton->output;
     baton->callback.Dispose();
     delete baton;
     delete req;
@@ -466,17 +473,19 @@ Handle<Value> VerifyAsyncBefore(const Arguments& args) {
  */
 void VerifyWork(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
+    uint8_t* passwordHash = NULL;
     
     //Hashed password was encoded to base64, so we need to decode it now
-    int base64DecodedLength = calcBase64DecodedLength(baton->message.c_str());
-    unsigned char passwordHash[base64DecodedLength];
-    base64_decode(baton->message.c_str(), baton->message.length(), passwordHash);
+    base64_decode(baton->message.c_str(), &passwordHash);
  
     //perform work
     baton->result = VerifyHash(
         passwordHash,
         (const uint8_t*)baton->password.c_str()
     );
+
+    //clean up
+    if (passwordHash) delete passwordHash;
 }
 
 /*
@@ -572,8 +581,9 @@ Handle<Value> EncryptAsyncBefore(const Arguments& args) {
  */
 void EncryptWork(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
-    uint32_t outbufSize = baton->message.length() + 128;
-    uint8_t outbuf[outbufSize];
+    size_t outbufSize = baton->message.length() + 128;
+    uint8_t outbuf[outbufSize]; //Perhaps this should be declared on the heap
+    char* base64Encode = NULL;
     
     //perform scrypt encryption
     baton->result = scryptenc_buf(
@@ -586,9 +596,7 @@ void EncryptWork(uv_work_t* req) {
     );
 
     //Encode to base64 for storage purposes
-    int base64EncodedLength = calcBase64EncodedLength(outbufSize);
-    char base64Encode[base64EncodedLength + 1]; //+1 added for ending null char '\0'
-    base64_encode(outbuf, outbufSize, base64Encode);
+    baton->outputLength = base64_encode(outbuf, outbufSize, &base64Encode);
     baton->output = base64Encode;
 }
 
@@ -619,7 +627,7 @@ void EncryptAsyncAfter(uv_work_t* req) {
         const unsigned argc = 2;
         Local<Value> argv[argc] = {
             Local<Value>::New(Null()),
-            Local<Value>::New(String::New((const char*)baton->output.c_str(), baton->output.length()))
+            Local<Value>::New(String::New((const char*)baton->output, baton->outputLength))
         };
 
         TryCatch try_catch;
@@ -631,6 +639,7 @@ void EncryptAsyncAfter(uv_work_t* req) {
 
     //Clean up
     baton->callback.Dispose();
+    if (baton->output) delete baton->output;
     delete baton;
     delete req;
 }
@@ -677,7 +686,7 @@ Handle<Value> DecryptAsyncBefore(const Arguments& args) {
     //Schedule work request
     int status = uv_queue_work(uv_default_loop(), req, DecryptWork, (uv_after_work_cb)DecryptAsyncAfter);
     assert(status == 0); 
-    
+   
     return scope.Close(Undefined());   
 }
 
@@ -688,23 +697,27 @@ void DecryptWork(uv_work_t* req) {
     Baton* baton = static_cast<Baton*>(req->data);
    
     //When encrypting, output was encoded in base64. So now we need to decode to get to the original
-    int base64DecodedLength = calcBase64DecodedLength(baton->message.c_str());
-    unsigned char cipher[base64DecodedLength];
-    base64_decode(baton->message.c_str(), baton->message.length(), cipher);
+    uint8_t *cipher = NULL;
+    size_t base64DecodedLength = base64_decode(baton->message.c_str(), &cipher);
     uint8_t outbuf[base64DecodedLength];
    
     //perform scrypt decryption
     baton->result = scryptdec_buf(
         (const uint8_t*)cipher,
-        (size_t) base64DecodedLength,
+        base64DecodedLength,
         outbuf,
-        &baton->outbuflen,
+        &baton->outputLength,
         (const uint8_t*)baton->password.c_str(),
         baton->password.length(),
         baton->maxmem, baton->maxmemfrac, baton->maxtime
     );
 
-    baton->output = std::string((const char*)outbuf, baton->outbuflen);
+
+    std::cout << "HELLO: "<<(char*)outbuf<<"\n";
+    baton->output = (char*)outbuf;
+    
+    //clean up
+    if (cipher) delete cipher;
 }
 
 /*
@@ -729,8 +742,8 @@ void DecryptAsyncAfter(uv_work_t* req) {
         const unsigned argc = 3;
         Local<Value> argv[argc] = {
             Local<Value>::New(Null()),
-            Local<Value>::New(String::New(baton->output.c_str(), baton->output.length())),
-            Local<Value>::New(Integer::New(baton->outbuflen))
+            Local<Value>::New(String::New(baton->output, baton->outputLength)),
+            Local<Value>::New(Integer::New(baton->outputLength))
         };
 
         TryCatch try_catch;
@@ -742,6 +755,9 @@ void DecryptAsyncAfter(uv_work_t* req) {
 
     //Clean up
     baton->callback.Dispose();
+    //if (baton->output) delete baton->output;
+    std::cout << "We work up to here: "<<baton->output<<"\n";
+
     delete baton;
     delete req;
 }

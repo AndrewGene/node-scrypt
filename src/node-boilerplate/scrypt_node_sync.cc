@@ -31,13 +31,13 @@ Barry Steyn barry.steyn@gmail.com
 
 #include "scrypt_node_sync.h"
 #include "scrypt_common.h"
-#include "base64.h"
 
 //Scrypt is a C library
 extern "C" {
     #include "../../scrypt/scrypt-1.1.6/lib/scryptenc/scryptenc.h"
     #include "keyderivation.h"
     #include "passwordhash.h"
+    #include "base64.h"
 }
 
 using namespace v8;
@@ -276,11 +276,12 @@ Handle<Value> HashSync(const Arguments& args) {
         return scope.Close(Undefined());
     } else {
         //Base64 encode for storage
-        int base64EncodedLength = calcBase64EncodedLength(96);
-        char base64Encode[base64EncodedLength + 1];
-        base64_encode(outbuf, 96, base64Encode);
+        char* base64Encode = NULL;
+        size_t base64EncodedLength = base64_encode(outbuf, 96, &base64Encode);
        
         Local<String> passwordHash = String::New((const char*)base64Encode, base64EncodedLength); 
+        if (base64Encode) delete base64Encode;
+
         return scope.Close(passwordHash);
     }
 }
@@ -304,11 +305,9 @@ Handle<Value> VerifySync(const Arguments& args) {
     String::Utf8Value hash(args[0]->ToString());
     String::Utf8Value password(args[1]->ToString());
 
-
     //Hashed password was encoded to base64, so we need to decode it now
-    int base64DecodedLength = calcBase64DecodedLength(*hash);
-    unsigned char passwordHash[base64DecodedLength];
-    base64_decode(*hash, hash.length(), passwordHash);
+    uint8_t* passwordHash = NULL;
+    base64_decode(*hash, &passwordHash);
     
     //perform scrypt password verify
     int result = VerifyHash(
@@ -321,6 +320,9 @@ Handle<Value> VerifySync(const Arguments& args) {
     } else {
         return scope.Close(Local<Value>::New(Boolean::New(true)));
     }
+
+    //clean up
+    if (passwordHash) delete passwordHash;
 }
 
 /*
@@ -347,7 +349,7 @@ Handle<Value> EncryptSync(const Arguments& args) {
     String::Utf8Value password(args[1]->ToString());
 
     //There is 128 byte header added that stores the hashed password
-    uint32_t outbufSize = message.length() + 128;
+    size_t outbufSize = message.length() + 128;
     uint8_t outbuf[outbufSize];
 
     //perform scrypt encryption
@@ -366,11 +368,14 @@ Handle<Value> EncryptSync(const Arguments& args) {
         );  
         return scope.Close(Undefined());
     } else {
-        int base64EncodedLength = calcBase64EncodedLength(outbufSize);
-        char base64Encode[base64EncodedLength + 1]; //+1 added for ending null char '\0'
-        base64_encode(outbuf, outbufSize, base64Encode);
+        char* base64Encode = NULL;
+        size_t base64EncodedLength = base64_encode(outbuf, outbufSize, &base64Encode);
+        Local<String> cipherText = String::New((const char*)base64Encode, base64EncodedLength); 
 
-        return scope.Close(Local<Value>::New(String::New((const char*)base64Encode, base64EncodedLength)));
+        //clean up
+        if (base64Encode) delete base64Encode;
+
+        return scope.Close(Local<Value>::New(cipherText));
     }   
 }
 
@@ -400,9 +405,8 @@ Handle<Value> DecryptSync(const Arguments& args) {
     String::Utf8Value password(args[1]->ToString());
 
     //When encrypting, output was encoded in base64. So now we need to decode to get to the original
-    int base64DecodedLength = calcBase64DecodedLength(*message);
-    unsigned char cipher[base64DecodedLength];
-    base64_decode(*message, message.length(), cipher);
+    uint8_t* cipher = NULL;
+    size_t base64DecodedLength = base64_decode(*message, &cipher);
     uint8_t outbuf[base64DecodedLength];
 
     //Scrypt decryption done here
@@ -415,6 +419,9 @@ Handle<Value> DecryptSync(const Arguments& args) {
         password.length(),
         maxmem, maxmemfrac, maxtime
     );
+   
+    //clean up
+    if (cipher) delete cipher;
     
     if (result) { //There has been a srypt error
         ThrowException(
