@@ -1,9 +1,6 @@
 //forward declarations
 
-/*
-int calcBase64EncodedLength(int len);
-int calcBase64DecodedLength(const char* b64input);
-*/
+#include <stdint.h>
 
 size_t
 base64_decode(const char* b64text, uint8_t **output);
