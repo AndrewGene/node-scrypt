@@ -53,7 +53,6 @@ void RegisterModule(Handle<Object> target) {
     target->Set(String::NewSymbol("verifyHashSync"),
         FunctionTemplate::New(VerifySync)->GetFunction());
 
-    
     /* Raw key derivation functions */
     //Asynchronous
     /*target->Set(String::NewSymbol("scryptKDF"),
